@@ -1,6 +1,6 @@
 {
   "name": "Trainingstagebuch",
-  "short_name": "Training",
+  "short_name": "Journal",
   "description": "Trainingstagebuch: Kalender, Daily Quest, PBs, Notizen und Auswertung",
   "lang": "de",
   "start_url": "./",
