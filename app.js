@@ -215,9 +215,17 @@ function nextCompetition() {
 
 // ---------- Daily Quest ----------
 // Ohne Eintrag wird die Quest aus dem Datum abgeleitet: Handy und Laptop zeigen dieselbe.
+// Quests mit „krank“ im Namen markieren Krankheitstage: nie zufällig gezogen, Streak pausiert.
+
+const isSickQuest = q => !!q && /krank/i.test(q.name);
+
+function isSickDay(date) {
+  const e = state.questLog[date];
+  return !!e && (!!e.sick || isSickQuest(quest(e.questId)));
+}
 
 function autoQuest(date) {
-  const pool = [...state.quests].sort((a, b) => a.id.localeCompare(b.id));
+  const pool = state.quests.filter(q => !isSickQuest(q)).sort((a, b) => a.id.localeCompare(b.id));
   if (!pool.length) return null;
   let i = hash(date) % pool.length;
   if (pool.length > 1) {
@@ -234,23 +242,28 @@ function questFor(date) {
   return (e && quest(e.questId)) || autoQuest(date);
 }
 
-const questDone = date => !!(state.questLog[date] && state.questLog[date].done);
+const questDone = date => !!(state.questLog[date] && state.questLog[date].done) && !isSickDay(date);
 
+// Krankheitstage zählen nicht mit, unterbrechen den Streak aber auch nicht
 function questStreak() {
   let d = todayStr();
   if (!questDone(d)) d = addDays(d, -1);
   let n = 0;
-  while (questDone(d)) { n++; d = addDays(d, -1); }
+  for (;;) {
+    if (questDone(d)) n++;
+    else if (!isSickDay(d)) break;
+    d = addDays(d, -1);
+  }
   return n;
 }
 
 function bestQuestStreak() {
-  const dates = Object.keys(state.questLog).filter(questDone).sort();
-  let best = 0, run = 0, prev = null;
-  for (const d of dates) {
-    run = prev && daysBetween(prev, d) === 1 ? run + 1 : 1;
-    best = Math.max(best, run);
-    prev = d;
+  const dates = Object.keys(state.questLog).sort();
+  if (!dates.length) return 0;
+  let best = 0, run = 0;
+  for (let d = dates[0]; d <= todayStr(); d = addDays(d, 1)) {
+    if (questDone(d)) best = Math.max(best, ++run);
+    else if (!isSickDay(d)) run = 0;
   }
   return best;
 }
@@ -588,21 +601,32 @@ function questCard(t) {
       <div class="empty">Kein Übungs-Pool. <a href="#" data-action="goto" data-tab="more">Unter „Mehr“ Übungen anlegen</a></div></div>`;
   }
   const done = questDone(t);
+  const sick = isSickDay(t);
   const streak = questStreak();
-  return `<div class="card">
-      <div class="card-head">
-        <h2>Daily Quest</h2>
-        <div class="streak"><span>🔥</span><span class="count">${streak}</span><span class="muted small">${streak === 1 ? 'Tag' : 'Tage'}</span></div>
-      </div>
-      <div class="quest ${done ? 'is-done' : ''}">
+  const rerollable = state.quests.filter(x => !isSickQuest(x)).length > 1;
+  const body = sick
+    ? `<div class="quest is-sick">
+        <div class="q-label">🤒 Krankheitstag</div>
+        <div class="q-name">Gute Besserung!</div>
+        <div class="q-target">Dein Streak pausiert heute und läuft danach weiter.</div>
+        <div class="btn-row"><button class="btn" data-action="unsick-quest" data-date="${t}">Doch nicht krank</button></div>
+      </div>`
+    : `<div class="quest ${done ? 'is-done' : ''}">
         <div class="q-label">${done ? '✓ Erledigt' : 'Deine Quest heute'}</div>
         <div class="q-name">${esc(q.name)}</div>
         ${q.target ? `<div class="q-target">${esc(q.target)}</div>` : ''}
         <div class="btn-row">
           <button class="btn ${done ? '' : 'primary'}" data-action="toggle-quest" data-date="${t}">${done ? 'Rückgängig' : '✓ Geschafft'}</button>
-          ${done || state.quests.length < 2 ? '' : `<button class="btn" data-action="reroll-quest" data-date="${t}">🎲 Neu würfeln</button>`}
+          ${done || !rerollable ? '' : `<button class="btn" data-action="reroll-quest" data-date="${t}">🎲 Neu würfeln</button>`}
         </div>
+        ${done ? '' : `<button class="btn small" style="margin-top:8px" data-action="sick-quest" data-date="${t}">🤒 Heute krank</button>`}
+      </div>`;
+  return `<div class="card">
+      <div class="card-head">
+        <h2>Daily Quest</h2>
+        <div class="streak"><span>🔥</span><span class="count">${streak}</span><span class="muted small">${streak === 1 ? 'Tag' : 'Tage'}</span></div>
       </div>
+      ${body}
       ${heatmap(t)}
       <div class="muted small" style="margin-top:8px">Rekord: ${bestQuestStreak()} Tage in Folge</div>
     </div>`;
@@ -614,10 +638,11 @@ function heatmap(t) {
   let cells = '';
   for (let i = 0; i < 140; i++) {
     const d = addDays(start, i);
-    let cls = d > t ? 'future' : questDone(d) ? 'h2' : '';
+    let cls = d > t ? 'future' : questDone(d) ? 'h2' : isSickDay(d) ? 'sick' : '';
     if (d === t) cls += ' today';
     const q = d <= t && state.questLog[d] && quest(state.questLog[d].questId);
-    cells += `<div class="${cls}" ${d <= t ? `data-tip="${fmtDate(d)}${questDone(d) && q ? '\n✓ ' + esc(q.name) : ''}"` : ''}></div>`;
+    const tipExtra = isSickDay(d) ? '\n🤒 krank' : questDone(d) && q ? '\n✓ ' + esc(q.name) : '';
+    cells += `<div class="${cls}" ${d <= t ? `data-tip="${fmtDate(d)}${tipExtra}"` : ''}></div>`;
   }
   return `<div class="heatmap">${cells}</div>`;
 }
@@ -755,7 +780,8 @@ function dayAgenda(date) {
       ${compItems}
       ${sess.map(s => sessionItem(s)).join('')}
       ${!sess.length && !comps.length ? '<div class="empty">Keine Einheit eingetragen.</div>' : ''}
-      ${q ? `<div class="muted small" style="margin-top:8px">Quest: ${esc(q.name)} ${questDone(date) ? '✓' : '✗'}</div>` : ''}
+      ${isSickDay(date) ? '<div class="muted small" style="margin-top:8px">🤒 Krankheitstag</div>'
+        : q ? `<div class="muted small" style="margin-top:8px">Quest: ${esc(q.name)} ${questDone(date) ? '✓' : '✗'}</div>` : ''}
       <div class="btn-row" style="margin-top:12px">
         <button class="btn primary" data-action="add-session" data-date="${date}">+ Einheit</button>
         <button class="btn" data-action="apply-template-week" data-date="${date}">Wochenvorlage einfügen</button>
@@ -1305,8 +1331,13 @@ function renderStats() {
   const minutes = inRange.reduce((sum, s) => sum + (Number(s.duration) || 0), 0);
   const rpes = inRange.filter(s => s.rpe).map(s => s.rpe);
   const days = daysBetween(firstWeek, t) + 1;
-  let questCount = 0;
-  for (let i = 0; i < days; i++) if (questDone(addDays(firstWeek, i))) questCount++;
+  let questCount = 0, sickCount = 0;
+  for (let i = 0; i < days; i++) {
+    const d = addDays(firstWeek, i);
+    if (questDone(d)) questCount++;
+    else if (isSickDay(d)) sickCount++;
+  }
+  const questDays = Math.max(1, days - sickCount);
 
   const weekList = Array.from({ length: weeks }, (_, i) => addDays(firstWeek, i * 7));
   const perWeek = weekList.map(ws => {
@@ -1325,7 +1356,7 @@ function renderStats() {
       <div class="kpi"><div class="v">${inRange.length}</div><div class="l">Einheiten erledigt</div><div class="s">Ø ${trimNum(inRange.length / weeks)} pro Woche</div></div>
       <div class="kpi"><div class="v">${fmtMinutes(minutes)}</div><div class="l">Trainingszeit</div><div class="s">Ø ${fmtMinutes(minutes / weeks)} pro Woche</div></div>
       <div class="kpi"><div class="v">${rpes.length ? trimNum(rpes.reduce((a, b) => a + b, 0) / rpes.length) : '–'}</div><div class="l">Ø Anstrengung (RPE)</div><div class="s">${rpes.length} Einheiten bewertet</div></div>
-      <div class="kpi"><div class="v">${Math.round(questCount / days * 100)} %</div><div class="l">Daily Quests geschafft</div><div class="s">${questCount} von ${days} Tagen</div></div>
+      <div class="kpi"><div class="v">${Math.round(questCount / questDays * 100)} %</div><div class="l">Daily Quests geschafft</div><div class="s">${questCount} von ${questDays} Tagen${sickCount ? ` · 🤒 ${sickCount} krank` : ''}</div></div>
     </div>`;
 
   const catTotals = Object.entries(CATS).map(([k, c]) => {
@@ -1564,7 +1595,7 @@ function aiPeriod() {
 
 const AI_SYSTEM = `Du bist ein erfahrener Leichtathletik-Trainer mit Schwerpunkt Stabhochsprung und analysierst das Trainingstagebuch eines Athleten. Du sprichst ihn direkt mit „du“ an, auf Deutsch.
 
-Deine Aufgabe: Bewerte den angegebenen Zeitraum ehrlich und konkret: Was lief gut, was fehlt, welche Muster zeigen sich? Stütze jede Aussage auf die gelieferten Daten (Einheiten, Inhalte, Journal-Einträge, Notizen, RPE, Daily Quests, Ergebnisse, Wettkämpfe) und nenne Beispiele mit Datum. Erfinde nichts. Wenn Daten fehlen oder lückenhaft sind (z. B. keine Dauer oder RPE eingetragen), sag das kurz und berücksichtige es in deiner Einschätzung. Bei Schmerzen oder Verletzungshinweisen gibst du keine Diagnose, sondern empfiehlst, das mit Physio oder Arzt abzuklären.
+Deine Aufgabe: Bewerte den angegebenen Zeitraum ehrlich und konkret: Was lief gut, was fehlt, welche Muster zeigen sich? Stütze jede Aussage auf die gelieferten Daten (Einheiten, Inhalte, Journal-Einträge, Notizen, RPE, Daily Quests, Ergebnisse, Wettkämpfe) und nenne Beispiele mit Datum. Erfinde nichts. Wenn Daten fehlen oder lückenhaft sind (z. B. keine Dauer oder RPE eingetragen), sag das kurz und berücksichtige es in deiner Einschätzung. Krankheitstage (bei den Kennzahlen aufgeführt) sind bewusst markiert: Ausgefallene Einheiten an diesen Tagen und kurz danach sind keine Disziplinfrage. Bewerte stattdessen Erholung und Wiedereinstieg und berücksichtige sie bei der Note. Bei Schmerzen oder Verletzungshinweisen gibst du keine Diagnose, sondern empfiehlst, das mit Physio oder Arzt abzuklären.
 
 Gliedere deine Antwort in Markdown mit diesen Abschnitten:
 ## Kurzfazit
@@ -1614,8 +1645,13 @@ function periodStats(from, to) {
   const rpes = ss.filter(s => s.rpe).map(s => s.rpe);
   const days = daysBetween(from, to) + 1;
   let quests = 0;
-  for (let i = 0; i < days; i++) if (questDone(addDays(from, i))) quests++;
-  return `${ss.length} erledigte Einheiten (${perCat}); Ø RPE ${rpes.length ? trimNum(rpes.reduce((a, b) => a + b, 0) / rpes.length) : '–'}; Daily Quests ${quests}/${days} Tage`;
+  const sick = [];
+  for (let i = 0; i < days; i++) {
+    const d = addDays(from, i);
+    if (questDone(d)) quests++;
+    else if (isSickDay(d)) sick.push(d);
+  }
+  return `${ss.length} erledigte Einheiten (${perCat}); Ø RPE ${rpes.length ? trimNum(rpes.reduce((a, b) => a + b, 0) / rpes.length) : '–'}; Daily Quests ${quests}/${days - sick.length} Tage; Krankheitstage: ${sick.length ? sick.join(', ') : 'keine'}`;
 }
 
 function buildAiPrompt(p, question) {
@@ -1831,7 +1867,7 @@ function renderMore() {
           <div class="card-head"><h2>Daily-Quest-Pool</h2><button class="btn small" data-action="add-quest">+ Übung</button></div>
           <p class="small muted" style="margin-top:0">Jeden Tag wird eine dieser Übungen zufällig als Quest gezogen.</p>
           ${state.quests.map(q => `<div class="list-item" data-action="edit-quest" data-id="${q.id}">
-              <div class="grow"><div class="title">${esc(q.name)}</div>${q.target ? `<div class="sub">${esc(q.target)}</div>` : ''}</div>
+              <div class="grow"><div class="title">${isSickQuest(q) ? '🤒 ' : ''}${esc(q.name)}</div>${isSickQuest(q) ? '<div class="sub">Markiert Krankheitstage, wird nie zufällig gezogen</div>' : q.target ? `<div class="sub">${esc(q.target)}</div>` : ''}</div>
             </div>`).join('') || '<div class="empty">Keine Übungen.</div>'}
         </div>
       </div>
@@ -2029,9 +2065,20 @@ const actions = {
     commit();
     if (done) toast(`🔥 Quest geschafft! Streak: ${questStreak()}`);
   },
+  'sick-quest': ds => {
+    const sq = state.quests.find(isSickQuest);
+    setQuestLog(ds.date, { ...(sq ? { questId: sq.id } : {}), sick: true, done: false });
+    commit();
+    toast('🤒 Gute Besserung! Dein Streak pausiert.');
+  },
+  'unsick-quest': ds => {
+    const q = autoQuest(ds.date);
+    setQuestLog(ds.date, { questId: q && q.id, sick: false, done: false });
+    commit();
+  },
   'reroll-quest': ds => {
     const cur = questFor(ds.date);
-    const others = state.quests.filter(q => q.id !== (cur && cur.id));
+    const others = state.quests.filter(q => q.id !== (cur && cur.id) && !isSickQuest(q));
     setQuestLog(ds.date, { questId: others[Math.floor(Math.random() * others.length)].id, done: false });
     commit();
   },
