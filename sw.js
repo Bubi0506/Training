@@ -1,6 +1,6 @@
 // Offline-Cache: liefert sofort aus dem Cache und aktualisiert im Hintergrund.
 // Bei Änderungen an der App CACHE hochzählen, damit alte Dateien entfernt werden.
-const CACHE = 'trainingstagebuch-v3';
+const CACHE = 'trainingstagebuch-v5';
 const ASSETS = [
   './',
   'index.html',

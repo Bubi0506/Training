@@ -135,6 +135,7 @@ function defaultState() {
       q('q-rope', 'Seilspringen', '5 min')
     ],
     questLog: {},
+    analyses: [],
     settings: {
       weekTemplate: {
         2: { cat: 'kraft', topic: 'Kraft zuhause', location: 'zuhause' },
@@ -184,7 +185,8 @@ const ui = {
   tab: 'today', calMonth: null, selDate: todayStr(),
   perfView: 'pbs', pbCat: 'la', pbDetail: null,
   notesView: 'infos', noteCat: 'all', noteQuery: '', journalQuery: '',
-  statWeeks: 12, statExercise: null, tableCat: 'all', tableQuery: ''
+  statWeeks: 12, statExercise: null, tableCat: 'all', tableQuery: '',
+  aiRange: 'lastMonth', aiFrom: '', aiTo: '', aiQuestion: ''
 };
 
 // ---------- Abfragen ----------
@@ -332,7 +334,7 @@ async function ghPut(data, sha) {
   return true;
 }
 
-const COLLECTIONS = ['sessions', 'disciplines', 'results', 'competitions', 'notes', 'quests'];
+const COLLECTIONS = ['sessions', 'disciplines', 'results', 'competitions', 'notes', 'quests', 'analyses'];
 
 function mergeStates(a, b) {
   const deleted = { ...(a.deleted || {}) };
@@ -1295,7 +1297,7 @@ function renderStats() {
   const strength = strengthCard();
   const pbTable = pbTableCard();
 
-  view.innerHTML = `${rangeSeg}${kpis}
+  view.innerHTML = `${aiCard()}${rangeSeg}${kpis}
     <div class="grid-2">
       <div class="card">
         <div class="card-head"><h2>Trainingszeit pro Woche</h2><span class="muted small">Minuten</span></div>
@@ -1495,6 +1497,264 @@ function exportCsv() {
   download(`trainingstagebuch-${todayStr()}.csv`, '﻿' + rows.map(r => r.map(q).join(';')).join('\r\n'), 'text/csv');
 }
 
+// ---------- KI-Analyse ----------
+// Kostenlos über die Claude-App: Die App baut die Anfrage, du schickst sie an Claude
+// und fügst die Antwort zum Speichern wieder ein.
+
+const AI_RANGES = { lastMonth: 'Letzter Monat', thisMonth: 'Dieser Monat', last4w: 'Letzte 4 Wochen', custom: 'Eigener Zeitraum' };
+
+function aiPeriod() {
+  const t = todayStr();
+  const d = parseYmd(t);
+  if (ui.aiRange === 'thisMonth') return { from: t.slice(0, 8) + '01', to: t, label: `${MONTHS[d.getMonth()]} ${d.getFullYear()} (bis heute)` };
+  if (ui.aiRange === 'last4w') return { from: addDays(t, -27), to: t, label: 'Letzte 4 Wochen' };
+  if (ui.aiRange === 'custom' && ui.aiFrom && ui.aiTo && ui.aiFrom <= ui.aiTo) {
+    return { from: ui.aiFrom, to: ui.aiTo, label: `${fmtDate(ui.aiFrom)} – ${fmtDate(ui.aiTo)}` };
+  }
+  if (ui.aiRange === 'custom') return null;
+  const first = new Date(d.getFullYear(), d.getMonth() - 1, 1);
+  const last = new Date(d.getFullYear(), d.getMonth(), 0);
+  return { from: ymd(first), to: ymd(last), label: `${MONTHS[first.getMonth()]} ${first.getFullYear()}` };
+}
+
+const AI_SYSTEM = `Du bist ein erfahrener Leichtathletik-Trainer mit Schwerpunkt Stabhochsprung und analysierst das Trainingstagebuch eines Athleten. Du sprichst ihn direkt mit „du“ an, auf Deutsch.
+
+Deine Aufgabe: Bewerte den angegebenen Zeitraum ehrlich und konkret: Was lief gut, was fehlt, welche Muster zeigen sich? Stütze jede Aussage auf die gelieferten Daten (Einheiten, Inhalte, Journal-Einträge, Notizen, RPE, Daily Quests, Ergebnisse, Wettkämpfe) und nenne Beispiele mit Datum. Erfinde nichts. Wenn Daten fehlen oder lückenhaft sind (z. B. keine Dauer oder RPE eingetragen), sag das kurz und berücksichtige es in deiner Einschätzung. Bei Schmerzen oder Verletzungshinweisen gibst du keine Diagnose, sondern empfiehlst, das mit Physio oder Arzt abzuklären.
+
+Gliedere deine Antwort in Markdown mit diesen Abschnitten:
+## Kurzfazit
+2–3 Sätze und eine Gesamtnote von 1 bis 10 für den Zeitraum, mit Begründung.
+## Umfang & Struktur
+Verteilung Grundlagen/Kraft/Technik, Regelmäßigkeit, Wochenrhythmus, Vergleich zum Vorzeitraum.
+## Belastung & Erholung
+RPE-Verlauf, Belastungsspitzen, Ruhetage, Hinweise auf Über- oder Unterforderung.
+## Technik
+Muster und wiederkehrende Themen aus Inhalten und Journal, Fortschritte, offene Baustellen.
+## Kraft
+Übungsauswahl, Gewichtsentwicklung, Regelmäßigkeit.
+## Blick auf die Wettkämpfe
+Passt das Training zu den anstehenden Wettkämpfen (Abstand, Periodisierung, Formaufbau)? Wenn keine anstehen, nenne, worauf der Aufbau jetzt zielen sollte.
+## Empfehlungen
+3 bis 5 konkrete, umsetzbare Punkte für die nächsten 2–4 Wochen.
+
+Schreib kompakt und praxisnah, wie ein Trainer im Gespräch. Keine Floskeln.`;
+
+function sessionLine(s, t) {
+  const c = CATS[s.cat] || CATS.grundlagen;
+  const status = s.done ? 'erledigt' : s.date < t ? 'NICHT erledigt (ausgefallen?)' : 'geplant';
+  const head = [
+    `${s.date} ${DOW[(parseYmd(s.date).getDay() + 6) % 7]}`,
+    c.label + (s.cat === 'kraft' && s.location ? ` (${LOCATIONS[s.location]})` : ''),
+    s.topic ? `„${s.topic}“` : '',
+    s.duration ? s.duration + ' min' : 'Dauer ?',
+    s.rpe ? 'RPE ' + s.rpe : 'RPE ?',
+    status
+  ].filter(Boolean).join(' · ');
+  const lines = [`- ${head}`];
+  if (s.content) lines.push(`  Inhalt: ${s.content.replace(/\n/g, ' / ')}`);
+  if ((s.exercises || []).length) {
+    lines.push('  Übungen: ' + s.exercises.map(e => [e.name, e.sets, e.weight && e.weight + ' kg', e.done ? '✓' : '✗'].filter(Boolean).join(' ')).join('; '));
+  }
+  if (s.journal) lines.push(`  Journal: ${s.journal.replace(/\n/g, ' / ')}`);
+  if (s.notes) lines.push(`  Notizen: ${s.notes.replace(/\n/g, ' / ')}`);
+  return lines.join('\n');
+}
+
+function periodStats(from, to) {
+  const ss = state.sessions.filter(s => s.date >= from && s.date <= to && s.done);
+  const perCat = Object.entries(CATS).map(([k, c]) => {
+    const x = ss.filter(s => s.cat === k);
+    return `${c.label} ${x.length}× / ${x.reduce((a, s) => a + (Number(s.duration) || 0), 0)} min`;
+  }).join(', ');
+  const rpes = ss.filter(s => s.rpe).map(s => s.rpe);
+  const days = daysBetween(from, to) + 1;
+  let quests = 0;
+  for (let i = 0; i < days; i++) if (questDone(addDays(from, i))) quests++;
+  return `${ss.length} erledigte Einheiten (${perCat}); Ø RPE ${rpes.length ? trimNum(rpes.reduce((a, b) => a + b, 0) / rpes.length) : '–'}; Daily Quests ${quests}/${days} Tage`;
+}
+
+function buildAiPrompt(p, question) {
+  const t = todayStr();
+  const len = daysBetween(p.from, p.to) + 1;
+  const prevTo = addDays(p.from, -1), prevFrom = addDays(p.from, -len);
+  const sessions = state.sessions.filter(s => s.date >= p.from && s.date <= p.to).sort((a, b) => a.date.localeCompare(b.date));
+
+  const weeks = [];
+  for (let ws = weekStart(p.from); ws <= p.to; ws = addDays(ws, 7)) {
+    const we = addDays(ws, 6);
+    const ss = sessions.filter(s => s.date >= ws && s.date <= we && s.done);
+    const min = ss.reduce((a, s) => a + (Number(s.duration) || 0), 0);
+    const load = ss.reduce((a, s) => a + (Number(s.duration) || 0) * (s.rpe || 0), 0);
+    weeks.push(`- Woche ab ${ws}: ${ss.length} Einheiten, ${min} min, Belastung (min×RPE) ${load}`);
+  }
+
+  const resultsIn = state.results.filter(r => r.date >= p.from && r.date <= p.to)
+    .map(r => { const d = discipline(r.disciplineId); return d ? `- ${r.date} ${d.name}: ${fmtValue(r.value, d.unit)}${r.note ? ' (' + r.note + ')' : ''}` : ''; })
+    .filter(Boolean);
+  const pbs = state.disciplines.map(d => { const b = bestResult(d); return b ? `- ${d.name}: ${fmtValue(b.value, d.unit)} (${b.date})` : ''; }).filter(Boolean);
+  const compsIn = state.competitions.filter(c => c.date >= p.from && c.date <= p.to)
+    .map(c => `- ${c.date} ${c.name}${c.location ? ', ' + c.location : ''}${c.goals ? ' | Ziele: ' + c.goals.replace(/\n/g, ' / ') : ''}${c.results ? ' | Ergebnis: ' + c.results.replace(/\n/g, ' / ') : ''}`);
+  const compsNext = state.competitions.filter(c => c.date > p.to && c.date >= t && daysBetween(t, c.date) <= 180)
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .map(c => `- ${c.date} (in ${daysBetween(t, c.date)} Tagen) ${c.name}${c.goals ? ' | Ziele: ' + c.goals.replace(/\n/g, ' / ') : ''}`);
+  const notes = state.notes.filter(n => !n.done)
+    .map(n => `- [${NOTE_CATS[n.cat] || n.cat}] ${n.title}${n.body ? ': ' + n.body.replace(/\n/g, ' / ') : ''}`);
+  const tpl = WEEK_ORDER.filter(wd => state.settings.weekTemplate[wd])
+    .map(wd => { const x = state.settings.weekTemplate[wd]; return `${DOW_LONG[wd]}: ${CATS[x.cat].label}${x.topic ? ' (' + x.topic + ')' : ''}`; }).join('; ');
+
+  return `# Trainingstagebuch: Analyse für ${p.label}
+Zeitraum: ${p.from} bis ${p.to} (${len} Tage). Heute ist ${t}.
+
+## Athlet
+Leichtathlet beim asc darmstadt, Hauptdisziplin Stabhochsprung. Trainiert normalerweise Mo–Fr, manchmal Sa. Kategorien: Grundlagen (Lauf, Athletik, allgemein), Kraft, Technik (meist Stabhochsprung).
+Feste Wochenvorlage: ${tpl || 'keine'}.
+
+## Kennzahlen
+Dieser Zeitraum: ${periodStats(p.from, p.to)}
+Vorzeitraum (${prevFrom} bis ${prevTo}): ${periodStats(prevFrom, prevTo)}
+
+## Wochenübersicht
+${weeks.join('\n') || '- keine Daten'}
+
+## Alle Einheiten im Zeitraum (${sessions.length})
+${sessions.map(s => sessionLine(s, t)).join('\n') || '- keine Einheiten eingetragen'}
+
+## Ergebnisse im Zeitraum
+${resultsIn.join('\n') || '- keine'}
+
+## Aktuelle Bestleistungen
+${pbs.join('\n') || '- keine eingetragen'}
+
+## Wettkämpfe im Zeitraum
+${compsIn.join('\n') || '- keine'}
+
+## Anstehende Wettkämpfe (nächste 6 Monate)
+${compsNext.join('\n') || '- keine eingetragen'}
+
+## Offene Notizen & ToDos des Athleten
+${notes.join('\n') || '- keine'}
+${question ? `\n## Frage des Athleten\n${question}\n` : ''}`;
+}
+
+// Kleiner Markdown-Renderer für die Antwort (Überschriften, Listen, fett, kursiv)
+function md(src) {
+  const inline = s => esc(s).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<i>$2</i>');
+  let html = '', list = null;
+  const close = () => { if (list) { html += `</${list}>`; list = null; } };
+  for (const raw of src.split('\n')) {
+    const line = raw.trimEnd();
+    let m;
+    if ((m = line.match(/^#{1,2}\s+(.*)/))) { close(); html += `<h3>${inline(m[1])}</h3>`; }
+    else if ((m = line.match(/^#{3,6}\s+(.*)/))) { close(); html += `<h4>${inline(m[1])}</h4>`; }
+    else if ((m = line.match(/^\s*[-*•]\s+(.*)/))) { if (list !== 'ul') { close(); html += '<ul>'; list = 'ul'; } html += `<li>${inline(m[1])}</li>`; }
+    else if ((m = line.match(/^\s*\d+[.)]\s+(.*)/))) { if (list !== 'ol') { close(); html += '<ol>'; list = 'ol'; } html += `<li>${inline(m[1])}</li>`; }
+    else if (!line.trim()) close();
+    else { close(); html += `<p>${inline(line)}</p>`; }
+  }
+  close();
+  return html;
+}
+
+function aiCard() {
+  const p = aiPeriod();
+  const count = p ? state.sessions.filter(s => s.date >= p.from && s.date <= p.to).length : 0;
+  const saved = [...state.analyses].sort((a, b) => b.createdAt - a.createdAt);
+  return `<div class="card ai-card">
+      <div class="card-head"><h2>🤖 KI-Analyse mit Claude</h2></div>
+      <p class="small muted" style="margin-top:0">Claude liest alle Einheiten, Journal-Einträge, Notizen, Ergebnisse und Wettkämpfe des Zeitraums und gibt dir eine Einschätzung wie ein Trainer. Läuft kostenlos über deine Claude-App.</p>
+      <div class="chips">${Object.entries(AI_RANGES).map(([k, l]) => `<button class="chip ${ui.aiRange === k ? 'active' : ''}" data-action="ai-range" data-r="${k}">${l}</button>`).join('')}</div>
+      ${ui.aiRange === 'custom' ? `<div class="row2">
+          <label class="field"><span>Von</span><input type="date" id="aiFrom" value="${ui.aiFrom}"></label>
+          <label class="field"><span>Bis</span><input type="date" id="aiTo" value="${ui.aiTo}"></label>
+        </div>` : ''}
+      <label class="field"><span>Worauf soll Claude besonders achten? (optional)</span>
+        <textarea id="aiQuestion" style="min-height:60px" placeholder="z. B. Bin ich gut auf die Hallensaison vorbereitet? Trainiere ich genug Technik?">${esc(ui.aiQuestion)}</textarea></label>
+      <div class="muted small" style="margin-bottom:10px">${p ? `${p.label}: ${count} Einheit(en)` : 'Bitte Zeitraum wählen'}</div>
+      <div class="btn-row">
+        <button class="btn primary" data-action="ai-send" ${!p || !count ? 'disabled' : ''}>1. In Claude analysieren</button>
+        <button class="btn" data-action="ai-paste" ${!p ? 'disabled' : ''}>2. Antwort speichern</button>
+      </div>
+      ${saved.length ? `<div style="margin-top:14px">
+        <div class="muted small" style="margin-bottom:4px">Gespeicherte Analysen</div>
+        ${saved.slice(0, 8).map(a => `<div class="list-item" data-action="ai-open" data-id="${a.id}">
+            <div class="grow"><div class="title">${esc(a.label)}</div>
+            <div class="meta">${new Date(a.createdAt).toLocaleDateString('de-DE')}${a.question ? ' · ' + esc(a.question.slice(0, 60)) : ''}</div></div>
+          </div>`).join('')}
+      </div>` : ''}
+    </div>`;
+}
+
+function aiSheetHtml(title, sub, body, id) {
+  return `<h2>${esc(title)}</h2>
+    <div class="muted small" style="margin:-8px 0 12px">${sub}</div>
+    <div class="md" id="aiOut">${body}</div>
+    ${id ? `<div class="btn-row" style="margin-top:16px">
+      <button type="button" class="btn" data-action="ai-copy-result" data-id="${id}">Text kopieren</button>
+      <button type="button" class="btn danger" data-action="ai-delete" data-id="${id}">Löschen</button>
+    </div>` : ''}`;
+}
+
+const aiFullPrompt = p => `${AI_SYSTEM}\n\n---\n\n${buildAiPrompt(p, ui.aiQuestion.trim())}`;
+
+// Schritt 1: Anfrage an die Claude-App teilen (Handy) bzw. kopieren und claude.ai öffnen (Laptop)
+async function sendAiPrompt() {
+  const p = aiPeriod();
+  if (!p) return;
+  const full = aiFullPrompt(p);
+  const canShare = !!navigator.share && innerWidth < 900;
+  let copied = false;
+  try { await navigator.clipboard.writeText(full); copied = true; } catch (e) { /* z. B. ohne Berechtigung */ }
+
+  openSheet(`<h2>Analyse: ${esc(p.label)}</h2>
+    ${copied ? '<p>📋 Die Anfrage mit allen Trainingsdaten ist <b>kopiert</b>.</p>' : `<p class="small muted">Automatisches Kopieren ging nicht. Text markieren und kopieren:</p>
+      <textarea style="width:100%;min-height:200px" readonly>${esc(full)}</textarea>`}
+    <ol class="steps">
+      <li>In Claude einen <b>neuen Chat</b> starten, einfügen und abschicken.</li>
+      <li>Claudes Antwort kopieren (unter der Antwort auf das Kopier-Symbol tippen).</li>
+      <li>Hier mit <b>„2. Antwort speichern“</b> einfügen, dann ist sie in der App gespeichert und auf allen Geräten.</li>
+    </ol>
+    <div class="btn-row">
+      ${canShare ? '<button type="button" class="btn primary" data-action="ai-share">An Claude-App teilen</button>' : ''}
+      <a class="btn ${canShare ? '' : 'primary'}" href="https://claude.ai/new" target="_blank" rel="noopener">claude.ai öffnen</a>
+    </div>`);
+}
+
+async function shareAiPrompt() {
+  const p = aiPeriod();
+  if (!p) return;
+  try {
+    await navigator.share({ title: `Trainingsanalyse ${p.label}`, text: aiFullPrompt(p) });
+  } catch (e) { /* abgebrochen */ }
+}
+
+// Schritt 2: Claudes Antwort einfügen und als Analyse speichern
+function openAiPasteSheet() {
+  const p = aiPeriod();
+  if (!p) return;
+  openSheet(`<h2>Antwort speichern</h2>
+    <div class="muted small" style="margin:-8px 0 12px">Zeitraum: ${esc(p.label)}</div>
+    <form id="f">
+      <label class="field"><span>Claudes Antwort</span>
+        <textarea name="text" style="min-height:260px" placeholder="Hier die kopierte Antwort von Claude einfügen …" required></textarea></label>
+      <button type="button" class="btn block" id="pasteBtn" style="margin-bottom:8px">Aus Zwischenablage einfügen</button>
+      <button class="btn primary block" type="submit">Speichern</button>
+    </form>`, el => {
+    const ta = $('[name=text]', el);
+    $('#pasteBtn', el).onclick = async () => {
+      try { ta.value = await navigator.clipboard.readText(); } catch (e) { toast('Bitte lange ins Feld tippen und „Einfügen“ wählen'); }
+    };
+    $('#f', el).onsubmit = e => {
+      e.preventDefault();
+      const text = ta.value.trim();
+      if (!text) return;
+      const analysis = { id: uid(), from: p.from, to: p.to, label: p.label, question: ui.aiQuestion.trim(), text, createdAt: Date.now() };
+      put('analyses', analysis);
+      commit();
+      openSheet(aiSheetHtml(`Analyse: ${p.label}`, `${new Date(analysis.createdAt).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' })} · gespeichert`, md(text), analysis.id));
+    };
+  });
+}
+
 // ---------- Ansicht: Mehr ----------
 
 function renderMore() {
@@ -1507,7 +1767,7 @@ function renderMore() {
     : syncCfg.lastSync ? 'Zuletzt: ' + new Date(syncCfg.lastSync).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' }) : 'Noch nie';
 
   view.innerHTML = `
-    <button class="btn block mobile-only" style="margin-bottom:14px" data-action="goto" data-tab="stats">📊 Auswertung öffnen (am Laptop übersichtlicher)</button>
+    <button class="btn block mobile-only" style="margin-bottom:14px" data-action="goto" data-tab="stats">📊 Auswertung & 🤖 KI-Analyse öffnen</button>
     <div class="grid-2">
       <div>
         <div class="card">
@@ -1799,6 +2059,23 @@ const actions = {
   },
 
   'stat-weeks': ds => { ui.statWeeks = Number(ds.w); render(); },
+  'ai-range': ds => { ui.aiRange = ds.r; render(); },
+  'ai-send': () => sendAiPrompt(),
+  'ai-share': () => shareAiPrompt(),
+  'ai-paste': () => openAiPasteSheet(),
+  'ai-open': ds => {
+    const a = findIn('analyses', ds.id);
+    openSheet(aiSheetHtml(`Analyse: ${a.label}`, `${new Date(a.createdAt).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' })}${a.question ? ' · Frage: ' + esc(a.question) : ''}`, md(a.text), a.id));
+  },
+  'ai-copy-result': async ds => {
+    try { await navigator.clipboard.writeText(findIn('analyses', ds.id).text); toast('Text kopiert'); } catch (e) { toast('Kopieren nicht möglich'); }
+  },
+  'ai-delete': ds => {
+    if (!confirm('Analyse löschen?')) return;
+    remove('analyses', ds.id);
+    closeSheet();
+    commit();
+  },
   'table-cat': ds => { ui.tableCat = ds.cat; render(); },
   'export-csv': () => exportCsv(),
 
@@ -1868,6 +2145,17 @@ document.addEventListener('click', e => {
 
 document.addEventListener('change', e => {
   if (e.target.dataset.change === 'stat-exercise') { ui.statExercise = e.target.value; render(); }
+});
+
+// Felder der KI-Analyse: nur merken, nicht neu zeichnen (Fokus bleibt)
+document.addEventListener('input', e => {
+  if (e.target.id === 'aiQuestion') ui.aiQuestion = e.target.value;
+});
+document.addEventListener('change', e => {
+  if (e.target.id === 'aiFrom' || e.target.id === 'aiTo') {
+    ui[e.target.id] = e.target.value;
+    render();
+  }
 });
 
 // Suchfeld der Einheiten-Tabelle: nur die Tabelle neu zeichnen, damit der Fokus bleibt
