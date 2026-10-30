@@ -186,7 +186,8 @@ const ui = {
   perfView: 'pbs', pbCat: 'la', pbDetail: null,
   notesView: 'infos', noteCat: 'all', noteQuery: '', journalQuery: '',
   statWeeks: 12, statExercise: null, tableCat: 'all', tableQuery: '',
-  aiRange: 'lastMonth', aiFrom: '', aiTo: '', aiQuestion: ''
+  aiRange: 'lastMonth', aiFrom: '', aiTo: '', aiQuestion: '',
+  recapFilter: 'all', recapQuery: ''
 };
 
 // ---------- Abfragen ----------
@@ -1229,8 +1230,20 @@ function renderNotes() {
   setTop('Notizen', undefined, ui.notesView === 'infos' ? iconBtn('add-note', ICON.plus) : '');
   const seg = `<div class="segmented">
       <button class="${ui.notesView === 'infos' ? 'active' : ''}" data-action="notes-view" data-v="infos">Infos & ToDos</button>
-      <button class="${ui.notesView === 'journal' ? 'active' : ''}" data-action="notes-view" data-v="journal">Technik-Journal</button>
+      <button class="${ui.notesView === 'journal' ? 'active' : ''}" data-action="notes-view" data-v="journal">Journal</button>
+      <button class="${ui.notesView === 'recaps' ? 'active' : ''}" data-action="notes-view" data-v="recaps">Recaps</button>
     </div>`;
+
+  if (ui.notesView === 'recaps') {
+    view.innerHTML = `${seg}
+      <div class="chips">${Object.entries(RECAP_FILTERS).map(([k, l]) => `<button class="chip ${ui.recapFilter === k ? 'active' : ''}" data-action="recap-filter" data-f="${k}">${l}</button>`).join('')}</div>
+      <input class="search" id="q" type="search" placeholder="Recaps durchsuchen …" value="${esc(ui.recapQuery)}">
+      ${gradeChartCard()}
+      <div id="list"></div>`;
+    const draw = () => { $('#list').innerHTML = recapList(); };
+    $('#q').oninput = e => { ui.recapQuery = e.target.value; draw(); };
+    return draw();
+  }
 
   if (ui.notesView === 'journal') {
     view.innerHTML = `${seg}
@@ -1293,6 +1306,65 @@ function journalList() {
       ${s.journal ? `<div style="white-space:pre-line">💭 ${esc(s.journal)}</div>` : ''}
       ${s.notes ? `<div class="small" style="white-space:pre-line;margin-top:6px">${esc(s.notes)}</div>` : ''}
     </div>`).join('');
+}
+
+// ---------- Recaps & Analysen ----------
+
+const RECAP_FILTERS = { all: 'Alle', week: 'Wochen', month: 'Monate', own: 'Eigene Analysen' };
+const recapKind = a => a.source === 'auto' ? (a.kind === 'month' ? 'month' : 'week') : 'own';
+const RECAP_BADGE = { week: '🔁 Woche', month: '🔁 Monat', own: '🤖 Eigene' };
+
+// Note aus dem Kurzfazit lesen, z. B. „Note 7/10“, „Note: 7,5 von 10“, „**7/10**“
+function recapGrade(text) {
+  const m = String(text).match(/Note[^0-9\n]{0,12}(\d{1,2}(?:[.,]\d)?)\s*(?:\/|von)\s*10/i) || String(text).match(/\b(\d{1,2}(?:[.,]\d)?)\s*\/\s*10\b/);
+  const v = m ? parseFloat(m[1].replace(',', '.')) : NaN;
+  return v >= 0 && v <= 10 ? v : null;
+}
+
+function recapPreview(text) {
+  return (text.split(/\n#+\s/)[0] || '').replace(/^#+.*\n/, '').replace(/[*#]/g, '').trim();
+}
+
+function recapList() {
+  const list = state.analyses
+    .filter(a => (ui.recapFilter === 'all' || recapKind(a) === ui.recapFilter) && matches(ui.recapQuery, a.label, a.text, a.question))
+    .sort((a, b) => (b.to || '').localeCompare(a.to || '') || b.createdAt - a.createdAt);
+  if (!list.length) {
+    return `<div class="card"><div class="empty">${state.analyses.length ? 'Nichts gefunden.'
+      : 'Noch keine Recaps. Claude schreibt sie automatisch jeden Sonntag (Woche) und am Monatsletzten (Monat). Eigene Analysen machst du unter Auswertung.'}</div></div>`;
+  }
+  let lastMonth = '';
+  return list.map(a => {
+    const month = a.to ? `${MONTHS[parseYmd(a.to).getMonth()]} ${parseYmd(a.to).getFullYear()}` : '';
+    const head = month && month !== lastMonth ? `<div class="recap-month">${month}</div>` : '';
+    lastMonth = month || lastMonth;
+    const grade = recapGrade(a.text);
+    const preview = recapPreview(a.text);
+    return `${head}<div class="card recap-item" data-action="ai-open" data-id="${a.id}">
+        <div class="card-head">
+          <h2>${esc(a.label)}</h2>
+          ${grade !== null ? `<span class="grade" style="background:${gradeColor(grade)}">${trimNum(grade)}</span>` : ''}
+        </div>
+        <div class="meta">${RECAP_BADGE[recapKind(a)]}${a.question ? ' · ' + esc(a.question.slice(0, 60)) : ''}</div>
+        ${preview ? `<div class="sub" style="margin-top:6px">${esc(preview.slice(0, 220))}${preview.length > 220 ? ' …' : ''}</div>` : ''}
+      </div>`;
+  }).join('');
+}
+
+// Ampel für die Note: rot < 5, gelb < 7, grün ab 7 (mit Zahl als Text, nie Farbe allein)
+const gradeColor = g => g >= 7 ? 'var(--good)' : g >= 5 ? '#c98500' : 'var(--danger)';
+
+function gradeChartCard() {
+  const pts = state.analyses
+    .filter(a => recapKind(a) === (ui.recapFilter === 'month' ? 'month' : 'week') && a.to && recapGrade(a.text) !== null)
+    .sort((a, b) => a.to.localeCompare(b.to))
+    .map(a => ({ date: a.to, value: recapGrade(a.text), tip: `${a.label}\nNote ${trimNum(recapGrade(a.text))}/10` }));
+  if (pts.length < 2 || ui.recapFilter === 'own') return '';
+  const avg = pts.reduce((s, p) => s + p.value, 0) / pts.length;
+  return `<div class="card">
+      <div class="card-head"><h2>Notenverlauf (${ui.recapFilter === 'month' ? 'Monate' : 'Wochen'})</h2><span class="muted small">Ø ${trimNum(avg)} · ${pts.length} Recaps</span></div>
+      ${lineChart(pts, { unit: 'points', label: v => trimNum(Math.round(v * 10) / 10) })}
+    </div>`;
 }
 
 function openNoteSheet(n, cat) {
@@ -1756,8 +1828,8 @@ function aiCard() {
         <button class="btn" data-action="ai-paste" ${!p ? 'disabled' : ''}>2. Antwort speichern</button>
       </div>
       ${saved.length ? `<div style="margin-top:14px">
-        <div class="muted small" style="margin-bottom:4px">Gespeicherte Analysen</div>
-        ${saved.slice(0, 8).map(a => `<div class="list-item" data-action="ai-open" data-id="${a.id}">
+        <div class="card-head" style="margin-bottom:4px"><span class="muted small">Zuletzt</span><a href="#" class="small" data-action="all-recaps">Alle Recaps →</a></div>
+        ${saved.slice(0, 3).map(a => `<div class="list-item" data-action="ai-open" data-id="${a.id}">
             <div class="grow"><div class="title">${a.source === 'auto' ? '🔁 ' : ''}${esc(a.label)}</div>
             <div class="meta">${new Date(a.createdAt).toLocaleDateString('de-DE')}${a.question ? ' · ' + esc(a.question.slice(0, 60)) : ''}</div></div>
           </div>`).join('')}
@@ -2136,6 +2208,8 @@ const actions = {
 
   'notes-view': ds => { ui.notesView = ds.v; render(); },
   'note-cat': ds => { ui.noteCat = ds.cat; render(); },
+  'recap-filter': ds => { ui.recapFilter = ds.f; render(); },
+  'all-recaps': () => { ui.tab = 'notes'; ui.notesView = 'recaps'; render(); scrollTo(0, 0); },
   'add-note': () => openNoteSheet(null, ui.noteCat),
   'edit-note': ds => openNoteSheet(findIn('notes', ds.id)),
   'toggle-note': ds => {
