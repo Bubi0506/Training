@@ -609,6 +609,7 @@ details.tbl summary { cursor: pointer; color: var(--text-2); font-size: 0.85rem;
 /* ---------- KI-Analyse ---------- */
 
 .ai-card { border-color: var(--accent); }
+.recap-card { border: 2px solid var(--accent); cursor: pointer; }
 .md { line-height: 1.55; }
 .md h3 { font-size: 1.05rem; margin: 18px 0 6px; padding-top: 10px; border-top: 1px solid var(--border); }
 .md h3:first-child { margin-top: 0; padding-top: 0; border-top: 0; }

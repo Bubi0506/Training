@@ -313,8 +313,8 @@ function ghError(status) {
   return 'GitHub-Fehler ' + status;
 }
 
-async function ghGet() {
-  const res = await fetch(`${ghRepoUrl()}/contents/${DATA_PATH}?t=${Date.now()}`, { headers: ghHeaders(), cache: 'no-store' });
+async function ghGet(path = DATA_PATH) {
+  const res = await fetch(`${ghRepoUrl()}/contents/${path}?t=${Date.now()}`, { headers: ghHeaders(), cache: 'no-store' });
   if (res.status === 404) return null;
   if (!res.ok) throw new Error(ghError(res.status));
   const j = await res.json();
@@ -382,6 +382,7 @@ async function runSync(manual) {
       if (remote && JSON.stringify(remote.data) === mergedJson) break;
       if (await ghPut(merged, remote && remote.sha)) break;
     }
+    await pullRecaps();
     syncCfg.lastSync = Date.now();
     saveSyncCfg();
     syncStatus = 'ok';
@@ -396,6 +397,25 @@ async function runSync(manual) {
   updateSyncDot();
   if (ui.tab === 'more' && !sheetOpen) render();
   if (syncAgain) { syncAgain = false; runSync(false); }
+}
+
+// Automatische Recaps (von Claudes geplanter Aufgabe) liegen in recaps.json und werden hier übernommen
+async function pullRecaps() {
+  let remote;
+  try { remote = await ghGet('recaps.json'); } catch (e) { return; }
+  if (!remote) return;
+  let changed = false;
+  for (const r of [].concat(remote.data)) {
+    if (!r || !r.id || state.deleted[r.id] >= (r.updatedAt || 0)) continue;
+    const ex = state.analyses.find(a => a.id === r.id);
+    if (ex && (ex.updatedAt || 0) >= (r.updatedAt || 0)) continue;
+    state.analyses = state.analyses.filter(a => a.id !== r.id).concat(r);
+    changed = true;
+  }
+  if (changed) {
+    saveLocal();
+    if (!sheetOpen) render();
+  }
 }
 
 async function testSyncConnection() {
@@ -531,6 +551,7 @@ function renderToday() {
       <div class="muted small">${DOW_LONG[now.getDay()]}</div>
       <div class="day">${now.getDate()}. ${MONTHS[now.getMonth()]}</div>
     </div>
+    ${recapBanner()}
     ${backupBanner()}
     <div class="grid-2"><div>${left}</div><div>${right}</div></div>`;
 }
@@ -624,6 +645,30 @@ function weekStats(t) {
         <div><div class="v">${fmtMinutes(minutes)}</div><div class="l">Trainingszeit</div></div>
         <div><div class="v">${quests}/7</div><div class="l">Quests</div></div>
       </div>
+    </div>`;
+}
+
+// "Gelesen" merkt sich jedes Gerät selbst
+const SEEN_KEY = 'trainingstagebuch-seen-recaps';
+function seenRecaps() {
+  try { return JSON.parse(localStorage.getItem(SEEN_KEY)) || []; } catch (e) { return []; }
+}
+function markRecapSeen(id) {
+  const seen = seenRecaps();
+  if (!seen.includes(id)) localStorage.setItem(SEEN_KEY, JSON.stringify([...seen, id].slice(-50)));
+}
+
+function recapBanner() {
+  const seen = seenRecaps();
+  const fresh = state.analyses
+    .filter(a => a.source === 'auto' && !seen.includes(a.id) && Date.now() - a.createdAt < 14 * 86400000)
+    .sort((a, b) => b.createdAt - a.createdAt)[0];
+  if (!fresh) return '';
+  const fazit = (fresh.text.split(/\n#+\s/)[0] || '').replace(/^#+.*\n/, '').replace(/[*#]/g, '').trim().slice(0, 160);
+  return `<div class="card recap-card" data-action="ai-open" data-id="${fresh.id}">
+      <div class="card-head"><h2>📬 Neues ${fresh.kind === 'month' ? 'Monats' : 'Wochen'}-Recap</h2><span class="pill">${esc(fresh.label)}</span></div>
+      ${fazit ? `<div class="small" style="color:var(--text-2)">${esc(fazit)}${fazit.length >= 160 ? ' …' : ''}</div>` : ''}
+      <div class="small" style="margin-top:6px;color:var(--accent);font-weight:700">Lesen →</div>
     </div>`;
 }
 
@@ -1677,7 +1722,7 @@ function aiCard() {
       ${saved.length ? `<div style="margin-top:14px">
         <div class="muted small" style="margin-bottom:4px">Gespeicherte Analysen</div>
         ${saved.slice(0, 8).map(a => `<div class="list-item" data-action="ai-open" data-id="${a.id}">
-            <div class="grow"><div class="title">${esc(a.label)}</div>
+            <div class="grow"><div class="title">${a.source === 'auto' ? '🔁 ' : ''}${esc(a.label)}</div>
             <div class="meta">${new Date(a.createdAt).toLocaleDateString('de-DE')}${a.question ? ' · ' + esc(a.question.slice(0, 60)) : ''}</div></div>
           </div>`).join('')}
       </div>` : ''}
@@ -2065,6 +2110,8 @@ const actions = {
   'ai-paste': () => openAiPasteSheet(),
   'ai-open': ds => {
     const a = findIn('analyses', ds.id);
+    markRecapSeen(a.id);
+    if (ui.tab === 'today') render();
     openSheet(aiSheetHtml(`Analyse: ${a.label}`, `${new Date(a.createdAt).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' })}${a.question ? ' · Frage: ' + esc(a.question) : ''}`, md(a.text), a.id));
   },
   'ai-copy-result': async ds => {
